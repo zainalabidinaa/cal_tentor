@@ -34,7 +34,7 @@ def clean_event_summary(summary):
     # Ta bort 'Aktivitetstyp'
     summary = re.sub(r'Aktivitetstyp', '', summary)
     
-    # Ta bort oönskade kurskoder
+    # Ta bort oönskade kurskoder (behåller BMA451)
     undesired_codes = ["BMA401", "BMK101", "KUBM26"]
     for code in undesired_codes:
         summary = re.sub(r'\b' + code + r'\b,?\s*', '', summary)
@@ -62,14 +62,17 @@ def clean_event_summary(summary):
     else:
         return summary.strip()
 
-def should_keep_event(summary: str) -> bool:
+def should_keep_event(raw_summary: str) -> bool:
     """
     Returnerar True om eventet ska behållas:
-      - Endast om sammanfattningen innehåller något av nyckelorden:
+      - Endast om sammanfattningen (ORIGINAL, orensad) innehåller något av nyckelorden:
         'Omtentamen', 'Salstentamen', 'Tentamen', 'muntlig tentamen', 'dugga'
       - Matchning sker case-insensitive.
     """
-    text = summary.lower()
+    if raw_summary is None:
+        return False
+
+    text = raw_summary.lower()
     return any(keyword in text for keyword in KEYWORDS)
 
 def clean_calendar():
@@ -77,8 +80,8 @@ def clean_calendar():
     Hämtar ICS-kalendern, rensar varje VEVENT med den modifierade sammanfattningen
     och returnerar den nya kalendern som iCal-data.
     
-    Endast events vars (rensade) summary innehåller något av nyckelorden
-    Omtentamen / Salstentamen / Tentamen / muntlig tentamen / dugga behålls.
+    Filtrering av tentor görs på ORIGINALSUMMARY,
+    medan vi visar den rensade summaryn i output.
     """
     response = requests.get(ICS_URL)
     response.raise_for_status()
@@ -92,11 +95,13 @@ def clean_calendar():
     for component in original_cal.walk():
         if component.name == "VEVENT":
             raw_summary = component.get('summary')
-            cleaned_summary = clean_event_summary(raw_summary)
-
-            # Filtrera: behåll endast tentamen/dugga-relaterade events
-            if not should_keep_event(cleaned_summary):
+            
+            # Filtrera först på ORIGINALET (så vi inte tappar "Tentamen" som ligger utanför Moment:)
+            if not should_keep_event(raw_summary):
                 continue
+
+            # Sedan rensar vi summaryn för att den ska se snygg ut
+            cleaned_summary = clean_event_summary(raw_summary)
 
             clean_event = Event()
             clean_event.add('summary', cleaned_summary)
