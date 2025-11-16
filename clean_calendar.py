@@ -10,6 +10,15 @@ ICS_URL = os.environ.get('ICS_URL')
 if not ICS_URL:
     raise ValueError("Missing ICS_URL environment variable. Please set it in your Render dashboard.")
 
+# Nyckelord för vilka events som ska behållas
+KEYWORDS = [
+    "omtentamen",
+    "salstentamen",
+    "tentamen",
+    "muntlig tentamen",
+    "dugga",
+]
+
 def clean_event_summary(summary):
     """
     Rensar händelsens sammanfattning enligt följande:
@@ -19,6 +28,9 @@ def clean_event_summary(summary):
          - Om den extraherade texten börjar med "Laboration Klinisk hematologi:" tas en avslutande " : Okänd" bort.
          - För andra fall extraheras texten upp till första kolon.
     """
+    if summary is None:
+        return ""
+
     # Ta bort 'Aktivitetstyp'
     summary = re.sub(r'Aktivitetstyp', '', summary)
     
@@ -40,7 +52,7 @@ def clean_event_summary(summary):
             moment_text = re.sub(r'\s*:\s*Okänd$', '', moment_text)
             return moment_text.strip()
         else:
-            # För andra moment: extrahera texten upp till nästa kolon
+            # För andra moment: extrahera texten upp till första kolon
             moment_pattern = r'^([^:]+)'
             match = re.search(moment_pattern, moment_text)
             if match:
@@ -50,12 +62,27 @@ def clean_event_summary(summary):
     else:
         return summary.strip()
 
+def should_keep_event(summary: str) -> bool:
+    """
+    Returnerar True om eventet ska behållas:
+      - Endast om sammanfattningen innehåller något av nyckelorden:
+        'Omtentamen', 'Salstentamen', 'Tentamen', 'muntlig tentamen', 'dugga'
+      - Matchning sker case-insensitive.
+    """
+    text = summary.lower()
+    return any(keyword in text for keyword in KEYWORDS)
+
 def clean_calendar():
     """
     Hämtar ICS-kalendern, rensar varje VEVENT med den modifierade sammanfattningen
     och returnerar den nya kalendern som iCal-data.
+    
+    Endast events vars (rensade) summary innehåller något av nyckelorden
+    Omtentamen / Salstentamen / Tentamen / muntlig tentamen / dugga behålls.
     """
     response = requests.get(ICS_URL)
+    response.raise_for_status()
+
     original_cal = Calendar.from_ical(response.text)
     
     clean_cal = Calendar()
@@ -64,9 +91,15 @@ def clean_calendar():
     
     for component in original_cal.walk():
         if component.name == "VEVENT":
+            raw_summary = component.get('summary')
+            cleaned_summary = clean_event_summary(raw_summary)
+
+            # Filtrera: behåll endast tentamen/dugga-relaterade events
+            if not should_keep_event(cleaned_summary):
+                continue
+
             clean_event = Event()
-            # Använd den modifierade funktionen för att rensa sammanfattningen
-            clean_event.add('summary', clean_event_summary(component.get('summary')))
+            clean_event.add('summary', cleaned_summary)
             clean_event.add('dtstart', component.get('dtstart'))
             clean_event.add('dtend', component.get('dtend'))
             clean_event.add('location', component.get('location', ''))
