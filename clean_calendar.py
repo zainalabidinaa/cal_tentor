@@ -148,7 +148,10 @@ def clean_calendar():
         if not COURSE_CODE_RE.match(cleaned_moment):
             course = extract_kursgrp_code(str(raw_summary))
             if course:
-                cleaned_moment = f"{course}: {cleaned_moment}"
+                # Replace first colon in the moment to avoid double-colon look
+                # e.g. "BMA201: Frågestund: inför Dp4" → "BMA201: Frågestund - inför Dp4"
+                moment_text = cleaned_moment.replace(':', ' -', 1) if ':' in cleaned_moment else cleaned_moment
+                cleaned_moment = f"{course}: {moment_text}"
 
         evt = Event()
         evt.add('summary', cleaned_moment)
