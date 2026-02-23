@@ -15,49 +15,111 @@ KEYWORDS = [
     "dugga",
     "examination",
     "omexamination",
+    "frågestund",
+    "ominlämning",
 ]
 
-def clean_event_summary(summary):
+# When multiple course codes appear in a Moment, keep the first match here
+PREFERRED_COURSES = ["BMA451", "BMA452", "BMA352", "BMA201", "BMA153", "BMA052", "BMA402"]
+
+# Regex to find any BMA/BMK/KUBM course code
+COURSE_CODE_RE = re.compile(r'\b(BMA\d{3}|BMK\d{3}|KUBM\d{2})\b')
+
+# Kurs.grp keyword → preferred course code (order matters: most specific first)
+KURSGRP_TO_CODE = [
+    ('cellbiologi', 'BMA201'),
+    ('biomedicinsk laboratorievetenskap ii', 'BMA452'),
+    ('laboratorievetenskap ii', 'BMA153'),
+    ('proteinkemi och analysmetoder', 'BMA052'),
+    ('laboratoriemedicin', 'BMA352'),
+]
+
+# Boilerplate text — truncate here (keep the phrase itself, drop everything after)
+TRUNCATE_AFTER = "Ingen sen ankomst efter start är tillåten!"
+
+
+def extract_kursgrp_code(raw_summary: str):
     """
-    Extracts Moment ONLY when it's a real field.
-    Keeps full event name otherwise.
+    Read the 'Kurs.grp:' field from the raw SUMMARY string and map it
+    to a known BMA course code. Returns None if no match.
     """
-    if summary is None:
+    match = re.search(r'Kurs\.grp:\s*(.+?)(?=\s+Sign:|\s+Moment:|$)', raw_summary)
+    if not match:
+        return None
+    kursgrp_text = match.group(1).lower()
+    for keyword, code in KURSGRP_TO_CODE:
+        if keyword in kursgrp_text:
+            return code
+    return None
+
+
+def simplify_moment(moment: str) -> str:
+    """
+    Clean up an extracted Moment string:
+    - Truncate long Inspera disclaimer after the 'no late entry' sentence.
+    - Strip sala seating/room placement info (e.g. 'Placering14-425 Alla A-Ö …').
+    - When multiple course codes appear, keep only the preferred one.
+    - Remove a trailing '(Dpx)' that duplicates info already in the text.
+    """
+    # 1. Truncate Inspera boilerplate
+    cut_idx = moment.find(TRUNCATE_AFTER)
+    if cut_idx != -1:
+        moment = moment[:cut_idx + len(TRUNCATE_AFTER)]
+
+    # 2. Strip sala seating info that runs on directly after 'Salstentamen'
+    moment = re.sub(r'\s*Placering.*', '', moment, flags=re.DOTALL)
+
+    # 3. Prefer one course code when multiple are listed
+    codes_found = COURSE_CODE_RE.findall(moment)
+    if len(codes_found) > 1:
+        preferred = next((c for c in PREFERRED_COURSES if c in codes_found), codes_found[0])
+        for code in codes_found:
+            if code != preferred:
+                moment = re.sub(r'\b' + re.escape(code) + r'\b,?\s*', '', moment)
+
+    # 4. Remove trailing '(Dpx)' duplication e.g. 'Frågestund: inför Dp4 (Dp4)'
+    moment = re.sub(r'\s*\(Dp\d+\)\s*$', '', moment)
+
+    # 5. Tidy up stray commas / whitespace
+    moment = re.sub(r',\s*,', ',', moment)
+    moment = moment.strip().strip(',').strip()
+
+    return moment
+
+
+def clean_event_summary(raw_summary):
+    """
+    Extract and clean the Moment field from the raw SUMMARY.
+    The SUMMARY from HKR's ICS looks like:
+      Program: … Kurs.grp: … Sign: … Moment: <content> Aktivitetstyp: …
+    Returns just the cleaned <content>.
+    """
+    if raw_summary is None:
         return ""
 
-    # Remove Aktivitetstyp lines
-    summary = re.sub(r'Aktivitetstyp[: ]*.*', '', summary)
+    summary = str(raw_summary)
 
-    # Remove unwanted course codes (keep BMA451)
-    for code in ["BMA401", "BMK101", "KUBM26"]:
-        summary = re.sub(r'\b' + code + r'\b,?\s*', '', summary)
+    # Drop everything from 'Aktivitetstyp' onward
+    summary = re.sub(r'\s*Aktivitetstyp[: ].*', '', summary, flags=re.DOTALL)
 
-    # STRICT Moment block (must be real field, not broken text)
-    moment_match = re.search(r'\bMoment:\s*(.+)$', summary)
+    # Extract the Moment field
+    moment_match = re.search(r'\bMoment:\s*(.+)', summary, re.DOTALL)
     if moment_match:
-        moment_text = moment_match.group(1).strip()
-        if moment_text.startswith("Laboration Klinisk hematologi:"):
-            moment_text = re.sub(r':\s*Okänd$', '', moment_text)
-        return moment_text.strip()
+        return simplify_moment(moment_match.group(1).strip())
 
-    # Otherwise keep full summary
+    # Fallback: return whatever is left (should not happen for well-formed events)
     return summary.strip()
 
 
 def should_keep_event(raw_summary: str) -> bool:
     """
-    Filters events:
-    - Always keep BMA451 events
-    - Otherwise only keep exam-related keywords
+    Keep an event if it is BMA451-related or contains an exam keyword.
     """
     if raw_summary is None:
         return False
-
-    text = raw_summary.lower()
-
+    text = str(raw_summary).lower()
     if "bma451" in text:
         return True
-
     return any(k in text for k in KEYWORDS)
 
 
@@ -79,10 +141,17 @@ def clean_calendar():
         if not should_keep_event(raw_summary):
             continue
 
-        cleaned_summary = clean_event_summary(raw_summary)
+        cleaned_moment = clean_event_summary(raw_summary)
+
+        # If the cleaned moment has no course code at the start, derive one
+        # from the Kurs.grp field and prepend it.
+        if not COURSE_CODE_RE.match(cleaned_moment):
+            course = extract_kursgrp_code(str(raw_summary))
+            if course:
+                cleaned_moment = f"{course}: {cleaned_moment}"
 
         evt = Event()
-        evt.add('summary', cleaned_summary)
+        evt.add('summary', cleaned_moment)
         evt.add('dtstart', comp.get('dtstart'))
         evt.add('dtend', comp.get('dtend'))
         evt.add('location', comp.get('location', ''))
@@ -91,6 +160,7 @@ def clean_calendar():
         clean_cal.add_component(evt)
 
     return clean_cal.to_ical()
+
 
 if __name__ == "__main__":
     print(clean_calendar().decode("utf-8"))
